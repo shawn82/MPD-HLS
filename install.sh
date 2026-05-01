@@ -8,6 +8,7 @@ SERVICE_NAME="mpd2hls"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 SCRIPT_PATH="/usr/local/bin/mpd2hls"
 DATA_DIR="$INSTALL_DIR"
+INSTALL_SCRIPT_URL="https://github.com/judy-gotv/MPD-HLS/raw/main/install.sh"
 
 # 根据架构选择下载地址
 ARCH=$(uname -m)
@@ -64,10 +65,11 @@ print_access_urls() {
         done
 }
 
-# 获取当前运行端口
+# 获取当前运行端口（兼容新旧两种环境变量）
 get_running_port() {
     systemctl show "$SERVICE_NAME" -p Environment 2>/dev/null \
-        | grep -o 'PANEL_ADDR=[^ ]*' | grep -o '[0-9]*$'
+        | grep -oE 'PANEL_ADDR=[^ ]+|PANEL_LISTEN=[^ ]+' \
+        | grep -oE '[0-9]+$'
 }
 
 # ─── 管理面板 ────────────────────────────────────────────────────────────────
@@ -363,10 +365,19 @@ do_update() {
 
 # ─── 安装管理命令 ─────────────────────────────────────────────────────────────
 install_command() {
-    cp "$0" "$SCRIPT_PATH" 2>/dev/null \
-        || cp "$(readlink -f "$0")" "$SCRIPT_PATH" 2>/dev/null \
-        || true
-    chmod +x "$SCRIPT_PATH" 2>/dev/null || true
+    # 优先直接复制当前脚本文件
+    local self
+    self=$(readlink -f "$0" 2>/dev/null)
+    if [ -f "$self" ] && [ "$self" != "/dev/stdin" ]; then
+        cp "$self" "$SCRIPT_PATH" && chmod +x "$SCRIPT_PATH" && return
+    fi
+    # 脚本通过管道运行时，从 GitHub 下载保存
+    if command -v curl &>/dev/null; then
+        curl -sL "$INSTALL_SCRIPT_URL" -o "$SCRIPT_PATH" && chmod +x "$SCRIPT_PATH" && return
+    elif command -v wget &>/dev/null; then
+        wget -qO "$SCRIPT_PATH" "$INSTALL_SCRIPT_URL" && chmod +x "$SCRIPT_PATH" && return
+    fi
+    warn "管理命令安装失败，可手动运行: curl -sL $INSTALL_SCRIPT_URL | bash"
 }
 
 # ─── 入口 ─────────────────────────────────────────────────────────────────────
