@@ -7,6 +7,7 @@ INSTALL_DIR="/opt/mpd2hls"
 SERVICE_NAME="mpd2hls"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 SCRIPT_PATH="/usr/local/bin/mpd2hls"
+DATA_DIR="$INSTALL_DIR"
 
 # 根据架构选择下载地址
 ARCH=$(uname -m)
@@ -21,48 +22,81 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 info()  { echo -e "${GREEN}[+]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
-error() { echo -e "${RED}[x]${NC} $1"; exit 1; }
+error() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 title() { echo -e "${CYAN}$1${NC}"; }
+step()  { echo -e "${BLUE}[→]${NC} $1"; }
 
 # 检查 root
 [ "$(id -u)" -eq 0 ] || error "请使用 root 权限运行"
 
+# 获取服务器公网 IP
+get_server_ip() {
+    curl -s4 --connect-timeout 4 ifconfig.me 2>/dev/null \
+        || curl -s4 --connect-timeout 4 ip.sb 2>/dev/null \
+        || curl -s6 --connect-timeout 4 ifconfig.me 2>/dev/null \
+        || hostname -I | awk '{print $1}'
+}
+
+# 打印所有可访问地址
+print_access_urls() {
+    local port=$1
+    echo -e "  ${BOLD}后台访问地址：${NC}"
+    # 本机所有 IPv4（排除 127.x）
+    ip -4 addr show 2>/dev/null \
+        | grep -oP '(?<=inet\s)\d+(\.\d+){3}' \
+        | grep -v '^127\.' \
+        | while read -r ip; do
+            echo -e "    ${GREEN}http://${ip}:${port}/admin${NC}"
+        done
+    # 本机所有 IPv6（排除回环和 link-local）
+    ip -6 addr show 2>/dev/null \
+        | grep -oP '(?<=inet6\s)[0-9a-f:]+' \
+        | grep -v '^::1$' \
+        | grep -v '^fe80' \
+        | while read -r ip; do
+            echo -e "    ${GREEN}http://[${ip}]:${port}/admin${NC}"
+        done
+}
+
+# 获取当前运行端口
+get_running_port() {
+    systemctl show "$SERVICE_NAME" -p Environment 2>/dev/null \
+        | grep -o 'PANEL_ADDR=[^ ]*' | grep -o '[0-9]*$'
+}
+
 # ─── 管理面板 ────────────────────────────────────────────────────────────────
 show_menu() {
     clear
-    title "================================================"
-    title "         MPD2HLS 管理面板                       "
-    title "================================================"
+    title "╔══════════════════════════════════════════════╗"
+    title "║          MPD2HLS  管理面板                   ║"
+    title "╚══════════════════════════════════════════════╝"
     echo ""
 
-    # 显示当前状态
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-        ADDR=$(systemctl show "$SERVICE_NAME" -p Environment 2>/dev/null \
-            | grep -o 'PANEL_ADDR=[^ ]*' | cut -d= -f2)
-        PORT=$(echo "$ADDR" | grep -o '[0-9]*$')
+        PORT=$(get_running_port)
         [ -z "$PORT" ] && PORT="?"
-        SERVER_IP=$(curl -s4 --connect-timeout 3 ifconfig.me 2>/dev/null \
-            || curl -s6 --connect-timeout 3 ifconfig.me 2>/dev/null \
-            || hostname -I | awk '{print $1}')
-        echo -e "  状态: ${GREEN}运行中${NC}"
+        SERVER_IP=$(get_server_ip)
+        echo -e "  状态: ${GREEN}● 运行中${NC}"
         echo -e "  访问: ${GREEN}http://${SERVER_IP}:${PORT}/admin${NC}"
     else
-        echo -e "  状态: ${RED}未运行${NC}"
+        echo -e "  状态: ${RED}● 未运行${NC}"
     fi
 
     echo ""
-    echo "  1. 安装"
-    echo "  2. 重启服务"
-    echo "  3. 停止服务"
-    echo "  4. 启动服务"
-    echo "  5. 查看日志"
-    echo "  6. 更新程序"
-    echo "  7. 卸载（删除所有安装的文件）"
-    echo "  0. 退出"
+    echo -e "  ${BOLD}1.${NC} 安装"
+    echo -e "  ${BOLD}2.${NC} 重启服务"
+    echo -e "  ${BOLD}3.${NC} 停止服务"
+    echo -e "  ${BOLD}4.${NC} 启动服务"
+    echo -e "  ${BOLD}5.${NC} 查看日志"
+    echo -e "  ${BOLD}6.${NC} 更新程序"
+    echo -e "  ${BOLD}7.${NC} 卸载（删除所有安装的文件）"
+    echo -e "  ${BOLD}0.${NC} 退出"
     echo ""
     read -rp "请选择 > " CHOICE
 
@@ -82,12 +116,12 @@ show_menu() {
 # ─── 安装 ────────────────────────────────────────────────────────────────────
 do_install() {
     clear
-    title "================================================"
-    title "         MPD2HLS 一键安装                       "
-    title "================================================"
+    title "╔══════════════════════════════════════════════╗"
+    title "║           MPD2HLS  一键安装                  ║"
+    title "╚══════════════════════════════════════════════╝"
     echo ""
 
-    # 检查系统架构
+    # 检查架构
     if [ -z "$DOWNLOAD_URL" ]; then
         error "不支持的系统架构: $ARCH（支持 x86_64 / aarch64 / armv7l）"
     fi
@@ -113,7 +147,8 @@ do_install() {
             continue
         fi
 
-        if ss -tlnp 2>/dev/null | grep -q ":${PORT} " || netstat -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+        if ss -tlnp 2>/dev/null | grep -q ":${PORT}[^0-9]" || \
+           netstat -tlnp 2>/dev/null | grep -q ":${PORT}[^0-9]"; then
             warn "端口 $PORT 已被占用，请换一个"
             continue
         fi
@@ -124,34 +159,34 @@ do_install() {
     echo ""
     echo -e "  端口: ${GREEN}$PORT${NC}"
     echo ""
-    read -rp "确认以上配置，按回车开始安装..." _CONFIRM
+    read -rp "确认以上配置，按回车开始安装... " _CONFIRM
     echo ""
 
     # 停止旧服务
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-        info "停止旧服务..."
+        step "停止旧服务..."
         systemctl stop "$SERVICE_NAME"
     fi
 
     # 创建目录
-    info "创建安装目录 $INSTALL_DIR"
+    step "创建安装目录 $INSTALL_DIR"
     mkdir -p "$INSTALL_DIR"
 
     # 下载
-    info "正在下载程序..."
+    step "正在下载程序..."
     if [ "$DOWNLOADER" = "curl" ]; then
         curl -L --progress-bar -o "$INSTALL_DIR/$BINARY_NAME" "$DOWNLOAD_URL" || error "下载失败，请检查网络"
     else
         wget --show-progress -O "$INSTALL_DIR/$BINARY_NAME" "$DOWNLOAD_URL" || error "下载失败，请检查网络"
     fi
     chmod +x "$INSTALL_DIR/$BINARY_NAME"
-    info "下载完成"
 
     # 安装管理命令
+    step "安装管理命令 mpd2hls..."
     install_command
 
     # 创建 systemd 服务
-    info "配置系统服务..."
+    step "配置系统服务..."
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=MPD2HLS Panel Service
@@ -172,26 +207,37 @@ Environment=PANEL_ADMIN_PATH=/admin
 WantedBy=multi-user.target
 EOF
 
-    info "启动服务..."
+    step "启动服务..."
     systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME"
+    systemctl enable "$SERVICE_NAME" --quiet
     systemctl start "$SERVICE_NAME"
     sleep 2
 
     if systemctl is-active --quiet "$SERVICE_NAME"; then
-        SERVER_IP=$(curl -s4 --connect-timeout 5 ifconfig.me 2>/dev/null \
-            || curl -s4 --connect-timeout 5 ip.sb 2>/dev/null \
-            || hostname -I | awk '{print $1}')
         echo ""
-        title "================================================"
-        title "              安装成功！                        "
-        title "================================================"
+        title "╔══════════════════════════════════════════════╗"
+        title "║              ✓  安装成功                     ║"
+        title "╚══════════════════════════════════════════════╝"
         echo ""
-        echo -e "  访问地址: ${GREEN}http://${SERVER_IP}:${PORT}/admin${NC}"
-        echo -e "  默认账号: ${GREEN}admin${NC}"
-        echo -e "  默认密码: ${GREEN}admin123${NC}"
+        echo -e "  ${BOLD}安装目录：${NC} $INSTALL_DIR"
+        echo -e "  ${BOLD}服务名称：${NC} $SERVICE_NAME"
+        echo -e "  ${BOLD}数据目录：${NC} $DATA_DIR"
+        echo -e "  ${BOLD}服务文件：${NC} $SERVICE_FILE"
         echo ""
-        echo -e "  输入 ${CYAN}mpd2hls${NC} 可随时返回此管理面板"
+        print_access_urls "$PORT"
+        echo ""
+        echo -e "  ${BOLD}登录账号：${NC} ${GREEN}admin${NC}"
+        echo -e "  ${BOLD}登录密码：${NC} ${GREEN}admin123${NC}  ${YELLOW}（登录后请及时修改）${NC}"
+        echo ""
+        echo -e "  ${BOLD}常用查看命令：${NC}"
+        echo -e "    systemctl status  $SERVICE_NAME   # 服务状态"
+        echo -e "    systemctl restart $SERVICE_NAME   # 重启服务"
+        echo -e "    journalctl -u $SERVICE_NAME -f    # 实时日志"
+        echo -e "    mpd2hls                           # 管理面板"
+        echo ""
+        title "──────────────────────────────────────────────"
+        systemctl status "$SERVICE_NAME" --no-pager -l
+        title "──────────────────────────────────────────────"
         echo ""
     else
         echo ""
@@ -213,12 +259,12 @@ EOF
 do_uninstall() {
     echo ""
     warn "此操作将删除所有安装的文件，包括程序、配置和服务！"
-    echo -e "  - 服务文件: $SERVICE_FILE"
-    echo -e "  - 程序目录: $INSTALL_DIR（含所有配置数据）"
-    echo -e "  - 管理命令: $SCRIPT_PATH"
+    echo -e "  - 服务文件: ${YELLOW}$SERVICE_FILE${NC}"
+    echo -e "  - 程序目录: ${YELLOW}$INSTALL_DIR${NC}（含所有配置数据）"
+    echo -e "  - 管理命令: ${YELLOW}$SCRIPT_PATH${NC}"
     echo ""
-    read -rp "确认卸载？输入 yes 继续: " CONFIRM
-    if [ "$CONFIRM" != "yes" ]; then
+    read -rp "确认卸载？输入 yes 或 y 继续: " CONFIRM
+    if [[ "$CONFIRM" != "yes" && "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
         warn "已取消"
         sleep 1
         show_menu
@@ -227,23 +273,23 @@ do_uninstall() {
 
     echo ""
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-        info "停止服务..."
+        step "停止服务..."
         systemctl stop "$SERVICE_NAME"
     fi
 
     if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
-        info "禁用开机自启..."
-        systemctl disable "$SERVICE_NAME"
+        step "禁用开机自启..."
+        systemctl disable "$SERVICE_NAME" --quiet
     fi
 
-    [ -f "$SERVICE_FILE" ] && { info "删除服务文件..."; rm -f "$SERVICE_FILE"; systemctl daemon-reload; }
-    [ -d "$INSTALL_DIR" ] && { info "删除程序目录..."; rm -rf "$INSTALL_DIR"; }
-    [ -f "$SCRIPT_PATH" ] && { info "删除管理命令..."; rm -f "$SCRIPT_PATH"; }
+    [ -f "$SERVICE_FILE" ] && { step "删除服务文件..."; rm -f "$SERVICE_FILE"; systemctl daemon-reload; }
+    [ -d "$INSTALL_DIR" ]  && { step "删除程序目录..."; rm -rf "$INSTALL_DIR"; }
+    [ -f "$SCRIPT_PATH" ]  && { step "删除管理命令..."; rm -f "$SCRIPT_PATH"; }
 
     echo ""
-    title "================================================"
-    title "              卸载完成！                        "
-    title "================================================"
+    title "╔══════════════════════════════════════════════╗"
+    title "║              卸载完成                        ║"
+    title "╚══════════════════════════════════════════════╝"
     echo ""
     info "所有文件已删除"
     echo ""
@@ -252,26 +298,34 @@ do_uninstall() {
 
 # ─── 其他操作 ─────────────────────────────────────────────────────────────────
 do_restart() {
-    info "重启服务..."
-    systemctl restart "$SERVICE_NAME" && info "重启成功" || warn "重启失败"
+    echo ""
+    step "重启服务..."
+    if systemctl restart "$SERVICE_NAME"; then
+        sleep 1
+        info "重启成功"
+    else
+        warn "重启失败"
+    fi
     sleep 1; show_menu
 }
 
 do_stop() {
-    info "停止服务..."
+    echo ""
+    step "停止服务..."
     systemctl stop "$SERVICE_NAME" && info "已停止" || warn "停止失败"
     sleep 1; show_menu
 }
 
 do_start() {
-    info "启动服务..."
+    echo ""
+    step "启动服务..."
     systemctl start "$SERVICE_NAME" && info "启动成功" || warn "启动失败"
     sleep 1; show_menu
 }
 
 do_logs() {
     echo ""
-    info "显示最近 50 行日志（Ctrl+C 退出）"
+    info "显示最近 50 行日志（Ctrl+C 退出实时跟踪）"
     echo ""
     journalctl -u "$SERVICE_NAME" -n 50 -f
     show_menu
@@ -283,10 +337,10 @@ do_update() {
         error "未找到 curl 或 wget"
     fi
 
-    info "停止服务..."
+    step "停止服务..."
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
-    info "下载最新版本..."
+    step "下载最新版本..."
     if command -v curl &>/dev/null; then
         curl -L --progress-bar -o "$INSTALL_DIR/$BINARY_NAME" "$DOWNLOAD_URL" || error "下载失败"
     else
@@ -294,18 +348,24 @@ do_update() {
     fi
     chmod +x "$INSTALL_DIR/$BINARY_NAME"
 
-    info "重启服务..."
+    step "重启服务..."
     systemctl start "$SERVICE_NAME"
-    sleep 1
+    sleep 2
 
-    systemctl is-active --quiet "$SERVICE_NAME" && info "更新成功！" || warn "服务启动失败"
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        info "更新成功！"
+    else
+        warn "服务启动失败，请查看日志"
+    fi
     read -rp "按回车返回菜单..." _
     show_menu
 }
 
 # ─── 安装管理命令 ─────────────────────────────────────────────────────────────
 install_command() {
-    cp "$0" "$SCRIPT_PATH" 2>/dev/null || cp "$(readlink -f "$0")" "$SCRIPT_PATH" 2>/dev/null || true
+    cp "$0" "$SCRIPT_PATH" 2>/dev/null \
+        || cp "$(readlink -f "$0")" "$SCRIPT_PATH" 2>/dev/null \
+        || true
     chmod +x "$SCRIPT_PATH" 2>/dev/null || true
 }
 
