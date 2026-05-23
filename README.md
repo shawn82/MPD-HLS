@@ -165,6 +165,242 @@ http://1.2.3.4:9527/admin
 
 ---
 
+## Nginx 反向代理配置（推荐 · 含分片伪装）
+
+下面是生产环境推荐的 nginx 配置：**双层架构 + 分片伪装为 `.jpeg`**，可以有效绕过 CDN/防火墙对 `.ts` 后缀的特殊处理与缓存策略，同时启用了 CORS 跨域支持和 Range 请求。
+
+### 配置原理
+
+| 层 | 作用 |
+|----|----|
+| **第一层** `127.0.0.1:9528` | 内部解压层。强制后端返回未压缩内容，方便第二层做 `sub_filter` 文本替换 |
+| **第二层** `:80 / :443` | 对外服务。把 m3u8 里的 `.ts` 替换为 `.jpeg`，请求 `.jpeg` 时内部回写为 `.ts`，对客户端透明 |
+
+### 完整配置文件
+
+把以下内容保存为 `/etc/nginx/conf.d/mpd2hls.conf`（或 `/etc/nginx/sites-available/mpd2hls`）：
+
+```nginx
+# ============================================================
+# 第一层：内部解压服务，监听 9528
+# ============================================================
+server {
+    listen 127.0.0.1:9528;
+
+    proxy_pass_header Server;
+
+    location / {
+        proxy_pass http://127.0.0.1:9527;
+        proxy_set_header Accept-Encoding "";
+        gunzip on;
+        gzip off;
+    }
+}
+
+# ============================================================
+# 第二层：对外服务，做内容替换和伪装
+# ============================================================
+server {
+    listen 80;
+    server_name iptv.example.com;          # ← 修改为你的域名
+
+    access_log /var/log/nginx/mpd_access.log;
+    error_log  /var/log/nginx/mpd_error.log warn;
+
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    proxy_connect_timeout   60s;
+    proxy_send_timeout      300s;
+    proxy_read_timeout      300s;
+    proxy_buffering         off;
+    proxy_cache             off;
+
+    # ─── master.m3u8：伪装成纯文本 ───
+    location ~ ^/ch/([a-zA-Z0-9_-]+)/master\.m3u8$ {
+        proxy_pass http://127.0.0.1:9528;
+        proxy_set_header Accept-Encoding "";
+
+        proxy_hide_header Content-Type;
+        add_header Content-Type "text/plain" always;
+
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
+        add_header Access-Control-Allow-Origin "*" always;
+    }
+
+    # ─── video.m3u8：把 .ts 替换为 .jpeg ───
+    location ~ ^/ch/([a-zA-Z0-9_-]+)/video\.m3u8$ {
+        proxy_pass http://127.0.0.1:9528;
+        proxy_set_header Accept-Encoding "";
+
+        proxy_buffering on;
+        proxy_buffer_size 16k;
+        proxy_buffers 4 32k;
+
+        proxy_hide_header Content-Type;
+        add_header Content-Type "text/plain" always;
+
+        sub_filter_types *;
+        sub_filter_once off;
+        sub_filter '.ts' '.jpeg';
+
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
+        add_header Access-Control-Allow-Origin "*" always;
+    }
+
+    # ─── audio.m3u8：把 .ts 替换为 .jpeg ───
+    location ~ ^/ch/([a-zA-Z0-9_-]+)/audio\.m3u8$ {
+        proxy_pass http://127.0.0.1:9528;
+        proxy_set_header Accept-Encoding "";
+
+        proxy_buffering on;
+        proxy_buffer_size 16k;
+        proxy_buffers 4 32k;
+
+        proxy_hide_header Content-Type;
+        add_header Content-Type "text/plain" always;
+
+        sub_filter_types *;
+        sub_filter_once off;
+        sub_filter '.ts' '.jpeg';
+
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
+        add_header Access-Control-Allow-Origin "*" always;
+    }
+
+    # ─── 客户端请求 /segments/*.jpeg，内部还原为 .ts ───
+    location ~ ^(/ch/[a-zA-Z0-9_-]+/segments/.*?)\.jpeg$ {
+        rewrite ^(/ch/[a-zA-Z0-9_-]+/segments/.*?)\.jpeg$ $1.ts break;
+        proxy_pass http://127.0.0.1:9527;
+
+        proxy_hide_header Content-Type;
+        add_header Content-Type "image/jpeg" always;
+        add_header Cache-Control "no-cache" always;
+        add_header Access-Control-Allow-Origin "*" always;
+    }
+
+    # ─── 客户端请求 /audio/*.jpeg，内部还原为 .ts ───
+    location ~ ^(/ch/[a-zA-Z0-9_-]+/audio/.*?)\.jpeg$ {
+        rewrite ^(/ch/[a-zA-Z0-9_-]+/audio/.*?)\.jpeg$ $1.ts break;
+        proxy_pass http://127.0.0.1:9527;
+
+        proxy_hide_header Content-Type;
+        add_header Content-Type "image/jpeg" always;
+        add_header Cache-Control "no-cache" always;
+        add_header Access-Control-Allow-Origin "*" always;
+    }
+
+    # ─── video TS 直接请求兜底伪装 ───
+    location ~ ^/ch/([a-zA-Z0-9_-]+)/segments/.*\.ts$ {
+        proxy_pass http://127.0.0.1:9527;
+
+        proxy_hide_header Content-Type;
+        add_header Content-Type "image/jpeg" always;
+        add_header Cache-Control "no-cache" always;
+        add_header Access-Control-Allow-Origin "*" always;
+    }
+
+    # ─── audio TS 直接请求兜底伪装 ───
+    location ~ ^/ch/([a-zA-Z0-9_-]+)/audio/.*\.ts$ {
+        proxy_pass http://127.0.0.1:9527;
+
+        proxy_hide_header Content-Type;
+        add_header Content-Type "image/jpeg" always;
+        add_header Cache-Control "no-cache" always;
+        add_header Access-Control-Allow-Origin "*" always;
+    }
+
+    # ─── 兜底路由：OPTIONS 预检 + 透明代理 ───
+    location / {
+        if ($request_method = OPTIONS) {
+            add_header Access-Control-Allow-Origin "*" always;
+            add_header Access-Control-Allow-Methods "GET, OPTIONS" always;
+            add_header Access-Control-Allow-Headers "Range, Origin, Accept" always;
+            add_header Access-Control-Max-Age 86400;
+            add_header Content-Length 0;
+            add_header Content-Type "text/plain";
+            return 204;
+        }
+
+        proxy_pass http://127.0.0.1:9527;
+
+        add_header Access-Control-Allow-Origin "*" always;
+        add_header Access-Control-Allow-Methods "GET, OPTIONS" always;
+        add_header Access-Control-Allow-Headers "Range, Origin, Accept" always;
+    }
+}
+```
+
+### 启用配置
+
+```bash
+# 1. 测试配置语法
+nginx -t
+
+# 2. 重载 nginx
+nginx -s reload
+# 或
+systemctl reload nginx
+```
+
+### 启用 HTTPS（推荐）
+
+使用 [acme.sh](https://github.com/acmesh-official/acme.sh) 或 [certbot](https://certbot.eff.org/) 自动签发 Let's Encrypt 免费证书：
+
+```bash
+# certbot 一键申请并自动改写 nginx 配置（推荐）
+apt install -y certbot python3-certbot-nginx
+certbot --nginx -d iptv.example.com
+
+# 或 acme.sh
+curl https://get.acme.sh | sh
+~/.acme.sh/acme.sh --issue -d iptv.example.com --nginx
+```
+
+### ⚠️ 依赖模块说明
+
+上述配置依赖 nginx 的 `sub_filter` 模块（**默认编译进官方包**），无需额外安装。检查方法：
+
+```bash
+nginx -V 2>&1 | grep -o "http_sub_module"
+# 输出 http_sub_module 即可
+```
+
+如果没有，请使用官方源安装：
+
+```bash
+# Debian/Ubuntu
+apt install -y nginx
+
+# CentOS/RHEL
+yum install -y nginx
+```
+
+### 效果
+
+配置后用户实际访问到的订阅地址会变成：
+
+```
+http://iptv.example.com/ch/<频道ID>/master.m3u8
+```
+
+播放器拉取 m3u8 后看到的分片路径会是 `.jpeg` 后缀，但实际内容仍是 `.ts`（MPEG-TS）。这样的好处：
+
+1. **过 CDN 缓存**：很多 CDN 对 `.jpeg` 走静态缓存策略，对 `.ts` 不缓存或限流
+2. **过运营商 DPI**：一些运营商对 `.ts` 流做 QoS 限速，伪装后绕过
+3. **过简单防火墙**：纯字符串规则的过滤策略
+4. **降低被识别为视频流的概率**
+
+---
+
 ## 修改密码 / 重置密码
 
 ### 方法一：在面板中修改（推荐）
