@@ -186,7 +186,7 @@ http://1.2.3.4:9527/admin
 # ============================================================
 server {
     listen 127.0.0.1:9528;
-
+    
     proxy_pass_header Server;
 
     location / {
@@ -203,7 +203,7 @@ server {
 server {
     listen 80;
     server_name iptv.example.com;          # ← 修改为你的域名
-
+    client_max_body_size 128m
     access_log /var/log/nginx/mpd_access.log;
     error_log  /var/log/nginx/mpd_error.log warn;
 
