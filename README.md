@@ -1,6 +1,6 @@
 <div align="center">
 
-# MPD2HLS
+# MPD2HLS   喜欢的兄弟麻烦点个  Star
 
 **MPD/DASH → HLS 转换服务 · 一键安装 · 自动管理**
 
