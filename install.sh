@@ -38,6 +38,7 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 PANEL_PORT="${PANEL_PORT:-9527}"
 PANEL_ADMIN_PATH="${PANEL_ADMIN_PATH:-/admin}"
+GH_REPO="${GH_REPO:-judy-gotv/MPD-HLS}"
 
 # GitHub Releases - latest 自动指向最新版本
 GH_REPO="${GH_REPO:-judy-gotv/MPD-HLS}"
@@ -76,11 +77,25 @@ detect_arch() {
 }
 
 arch_url() {
+  local tag="${2:-$GH_RELEASE_TAG}"
+  local base
+  if [ -z "$tag" ] || [ "$tag" = "latest" ]; then
+    base="https://github.com/${GH_REPO}/releases/latest/download"
+  else
+    base="https://github.com/${GH_REPO}/releases/download/${tag}"
+  fi
   case "$1" in
-    amd64) echo "$URL_AMD64" ;;
-    arm64) echo "$URL_ARM64" ;;
-    armv7) echo "$URL_ARMV7" ;;
+    amd64) echo "${base}/mpd2hls" ;;
+    arm64) echo "${base}/mpd2hls-aarch64" ;;
+    armv7) echo "${base}/mpd2hls-armv7" ;;
     *)     echo "" ;;
+  esac
+}
+
+is_arch() {
+  case "${1:-}" in
+    auto|amd64|arm64|armv7) return 0 ;;
+    *) return 1 ;;
   esac
 }
 
@@ -148,7 +163,8 @@ prepare_dirs() {
 # ---------------- 下载二进制 ----------------
 download_binary() {
   local arch="$1"
-  local url; url="$(arch_url "$arch")"
+  local tag="${2:-$GH_RELEASE_TAG}"
+  local url; url="$(arch_url "$arch" "$tag")"
   [ -z "$url" ] && error "不支持的架构: $arch"
 
   step "下载 $arch 二进制 ..."
@@ -485,6 +501,11 @@ print_banner() {
 # ---------------- 主动作 ----------------
 do_install() {
   local arch="${1:-}"
+  local tag="${2:-$GH_RELEASE_TAG}"
+  if ! is_arch "$arch"; then
+    tag="$arch"
+    arch="auto"
+  fi
   if [ -z "$arch" ] || [ "$arch" = "auto" ]; then
     arch="$(detect_arch)"
     [ "$arch" = "unknown" ] && error "无法识别架构: $(uname -m)，请手动指定 amd64/arm64/armv7"
@@ -492,7 +513,8 @@ do_install() {
   fi
   prepare_basics
   prepare_dirs
-  download_binary "$arch"
+  GH_RELEASE_TAG="$tag"
+  download_binary "$arch" "$tag"
   init_env_file
   write_systemd_service
   start_service
@@ -500,10 +522,12 @@ do_install() {
 }
 
 do_update() {
+  local tag="${1:-$GH_RELEASE_TAG}"
   log "更新 = 拉取最新二进制 + 重启服务（配置文件保留）"
   local arch; arch="$(detect_arch)"
   [ "$arch" = "unknown" ] && error "无法识别架构: $(uname -m)"
-  download_binary "$arch"
+  GH_RELEASE_TAG="$tag"
+  download_binary "$arch" "$tag"
   # 服务文件可能也要同步（避免老版本字段过时）
   write_systemd_service
   start_service
@@ -644,12 +668,13 @@ menu_loop() {
 
 # ---------------- 入口 ----------------
 case "${1:-}" in
-  install)            do_install "${2:-auto}" ;;
-  install-amd64)      do_install amd64 ;;
-  install-arm64)      do_install arm64 ;;
-  install-armv7)      do_install armv7 ;;
+  install)            do_install "${2:-auto}" "${3:-$GH_RELEASE_TAG}" ;;
+  install-version)    do_install auto "${2:-$GH_RELEASE_TAG}" ;;
+  install-amd64)      do_install amd64 "${2:-$GH_RELEASE_TAG}" ;;
+  install-arm64)      do_install arm64 "${2:-$GH_RELEASE_TAG}" ;;
+  install-armv7)      do_install armv7 "${2:-$GH_RELEASE_TAG}" ;;
   ip-port|ipport|public-bind) configure_ip_port_mode ;;
-  update)             do_update ;;
+  update)             do_update "${2:-$GH_RELEASE_TAG}" ;;
   start)              start_service ;;
   stop)               stop_service ;;
   restart)            stop_service; start_service ;;
@@ -683,6 +708,10 @@ mpd2hls 一键安装脚本
 
 示例：
   GH_RELEASE_TAG=0.2.33 bash $0 install
+  bash $0 install 0.2.33
+  bash $0 install amd64 0.2.33
+  bash $0 install-version 0.2.33
+  bash $0 update 0.2.33
   PANEL_PORT=18080 bash $0 install amd64
   bash $0 ip-port
 EOF
