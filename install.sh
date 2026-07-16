@@ -176,6 +176,15 @@ download_binary() {
   fi
   log "  - 已下载: $(du -h "$tmp" | cut -f1) -> $tmp"
 
+  chmod 0755 "$tmp"
+  local binary_role
+  binary_role="$("$tmp" --binary-role 2>/dev/null || true)"
+  if [ "$binary_role" != "panel" ]; then
+    rm -f "$tmp"
+    error "下载的文件不是后台 panel 二进制，已拒绝安装，避免 systemd 重启循环"
+  fi
+  log "  - 二进制角色校验: panel ✅"
+
   # 备份旧二进制
   if [ -f "$BIN_PATH" ]; then
     $SUDO cp -a "$BIN_PATH" "${BIN_PATH}.bak.$(date +%Y%m%d-%H%M%S)" || true
